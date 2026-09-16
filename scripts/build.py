@@ -109,6 +109,10 @@ def main():
             shard = hashlib.md5(cid.encode('utf-8')).hexdigest()[:2]
             z.writestr('ch/%s/%s.json' % (shard, cid), json.dumps(clean, ensure_ascii=False, separators=(',', ':')))
 
+    # Never replace a working guide with an empty one (e.g. every grab job failed)
+    if len(best) < 50:
+        raise SystemExit('Only %d channels have programmes; not publishing, the previous guide stays live.' % len(best))
+
     size = os.path.getsize(zpath)
     if size > ZIP_LIMIT:
         raise SystemExit('Package is %d MB, over the GitHub file limit. Lower DAYS.' % (size // 1048576))
