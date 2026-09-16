@@ -87,7 +87,8 @@ jobs:
 
   build:
     needs: grab
-    if: always()
+    # Runs even if some grab jobs failed, but not when the run was cancelled
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
