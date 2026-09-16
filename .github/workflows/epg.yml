@@ -1,0 +1,112 @@
+# Teleora EPG — builds the TV guide for every Teleora channel that has one.
+#
+# There is no schedule here on purpose. The Teleora website starts this
+# workflow itself (repository_dispatch) whenever its guide is older than
+# about 20 hours, so the guide stays fresh as long as people use the site.
+# You can also start it by hand: Actions > Build Teleora EPG > Run workflow.
+
+name: Build Teleora EPG
+
+on:
+  workflow_dispatch:
+  repository_dispatch:
+    types: [teleora-epg]
+
+concurrency:
+  group: teleora-epg
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # The list of channel ids to build a guide for
+  IDS_URL: https://teleora.cc/api/epg-ids.php
+  # Parallel grab jobs (public repositories get 20 at once for free)
+  BUCKETS: 20
+  # Days of programmes to download (today + tomorrow)
+  DAYS: 2
+
+jobs:
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      buckets: ${{ steps.plan.outputs.buckets }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Get the iptv-org EPG grabber
+        run: git clone --depth 1 https://github.com/iptv-org/epg.git epg
+
+      - name: Plan which site grabs which channel
+        id: plan
+        run: python3 scripts/plan.py --epg epg --ids-url "$IDS_URL" --buckets "$BUCKETS" --out plan
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: plan
+          path: plan
+          retention-days: 2
+
+  grab:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+    strategy:
+      fail-fast: false
+      max-parallel: 20
+      matrix:
+        bucket: ${{ fromJson(needs.plan.outputs.buckets) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the iptv-org EPG grabber
+        run: |
+          git clone --depth 1 https://github.com/iptv-org/epg.git epg
+          cd epg && npm ci --no-audit --no-fund
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: plan
+          path: plan
+
+      - name: Grab guides
+        run: bash scripts/grab.sh "plan/bucket-${{ matrix.bucket }}" "out" "$DAYS" 320
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: guides-${{ matrix.bucket }}
+          path: out
+          if-no-files-found: ignore
+          retention-days: 2
+
+  build:
+    needs: grab
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: guides-*
+          path: guides
+          merge-multiple: true
+
+      - name: Build the Teleora guide package
+        run: python3 scripts/build.py --in guides --out dist
+
+      - name: Publish to the data branch
+        run: |
+          cd dist
+          git init -q -b data
+          git config user.name "teleora-epg"
+          git config user.email "teleora-epg@users.noreply.github.com"
+          git add .
+          git commit -q -m "EPG $(date -u +%Y-%m-%dT%H:%MZ)"
+          git push -q -f "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" data
