@@ -1,0 +1,79 @@
+# Quick EPG test: 5 Indian channels from 3 sources, about 3 minutes.
+# Actions > Test EPG (India) > Run workflow. Results appear on the run's Summary page.
+name: Test EPG (India)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install the iptv-org EPG grabber
+        run: |
+          git clone --depth 1 https://github.com/iptv-org/epg.git epg
+          cd epg && npm ci --no-audit --no-fund
+
+      - name: Grab 5 Indian channels from tataplay, dishtv and airtelxstream
+        run: |
+          mkdir -p test
+          python3 - <<'PY'
+          import re, glob
+          want = ['AajTak.in@SD', 'ABPNews.in@SD', 'IndiaTV.in@SD', '9XM.in@SD', 'DDNational.in@SD']
+          for site in ['tataplay.com', 'dishtv.in', 'airtelxstream.in']:
+              rows, seen = [], set()
+              for f in glob.glob(f'epg/sites/{site}/*.channels.xml'):
+                  for line in open(f, encoding='utf-8'):
+                      m = re.search(r'xmltv_id="([^"]+)"', line)
+                      if m and m.group(1) in want and m.group(1) not in seen:
+                          seen.add(m.group(1)); rows.append(line.strip())
+              open(f'test/{site}.channels.xml', 'w', encoding='utf-8').write(
+                  '<?xml version="1.0" encoding="UTF-8"?>\n<channels>\n' + '\n'.join(rows) + '\n</channels>\n')
+              print(site, len(rows), 'channels')
+          PY
+          cd epg
+          for site in tataplay.com dishtv.in airtelxstream.in; do
+            echo "=== $site"
+            timeout 300 npx tsx scripts/commands/epg/grab.ts --channels="../test/$site.channels.xml" \
+              --output="../test/$site.xml" --days=1 --maxConnections=5 --timeout=20000 || echo "  $site failed or timed out"
+          done
+
+      - name: Show what came back
+        if: always()
+        run: |
+          python3 - <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import glob, os, re, time, xml.etree.ElementTree as ET
+          from datetime import datetime, timezone, timedelta
+          IST = timezone(timedelta(hours=5, minutes=30))
+          def ts(v):
+              m = re.match(r'(\d{14})\s*([+-]\d{4})?', v or '')
+              if not m: return 0
+              off = m.group(2) or '+0000'
+              sec = (1 if off[0] == '+' else -1) * (int(off[1:3]) * 3600 + int(off[3:5]) * 60)
+              return int(datetime.strptime(m.group(1), '%Y%m%d%H%M%S').replace(tzinfo=timezone.utc).timestamp()) - sec
+          now = time.time()
+          print('## EPG test, India\n')
+          print('| Source | Channel | Programmes | On now (IST) | Next |')
+          print('|---|---|---|---|---|')
+          for site in ['tataplay.com', 'dishtv.in', 'airtelxstream.in']:
+              path = f'test/{site}.xml'
+              if not os.path.exists(path) or os.path.getsize(path) < 100:
+                  print(f'| {site} | – | **no data** | | |'); continue
+              progs = {}
+              for p in ET.parse(path).getroot().iter('programme'):
+                  t = p.find('title')
+                  progs.setdefault(p.get('channel'), []).append((ts(p.get('start')), ts(p.get('stop')), (t.text or '').strip() if t is not None else ''))
+              if not progs:
+                  print(f'| {site} | – | **0 programmes** | | |')
+              for ch, items in sorted(progs.items()):
+                  items.sort()
+                  cur = next((i for i in items if i[0] <= now < i[1]), None)
+                  nxt = next((i for i in items if i[0] > now), None)
+                  fmt = lambda i: f"{datetime.fromtimestamp(i[0], IST).strftime('%H:%M')} {i[2]}" if i else '–'
+                  print(f'| {site} | {ch} | {len(items)} | {fmt(cur)} | {fmt(nxt)} |')
+          PY
