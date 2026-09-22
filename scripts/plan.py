@@ -6,21 +6,52 @@ work into buckets that run in parallel.
 For each channel the best source is used first and up to two others are kept
 as fallbacks, in case the first one returns nothing.
 """
-import argparse, collections, glob, json, os, urllib.request, xml.etree.ElementTree as ET
+import argparse, collections, glob, json, os, time, urllib.request, xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape, quoteattr
 
 # Sources that are usually fast and complete are tried first.
 PREFERRED = ['i.mjh.nz', 'pluto.tv', 'tataplay.com', 'sky.com', 'tvtv.us', 'tvpassport.com']
 
 
-def load_ids(url):
+def load_ids(path, url):
+    """The channel ids to build a guide for.
+
+    1. ids.json in this repository — the Teleora site uploads it before every build,
+       so nothing has to be downloaded from the site (hosting firewalls often answer
+       GitHub's servers with 403 Forbidden).
+    2. Otherwise the site's own list, asked for like a normal browser, three tries.
+    """
+    if path and os.path.isfile(path):
+        with open(path, encoding='utf-8') as f:
+            data = json.load(f)
+        ids = data.get('ids', data) if isinstance(data, dict) else data
+        ids = set(str(i) for i in ids if i)
+        if ids:
+            print('Channel list: %d ids from %s' % (len(ids), path))
+            return ids
     if not url:
         return None
-    req = urllib.request.Request(url, headers={'User-Agent': 'teleora-epg'})
-    with urllib.request.urlopen(req, timeout=60) as r:
-        data = json.loads(r.read().decode('utf-8'))
-    ids = data.get('ids', data) if isinstance(data, dict) else data
-    return set(str(i) for i in ids if i)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36',
+        'Accept': 'application/json,text/plain,*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+    }
+    last = None
+    for attempt in range(3):
+        try:
+            req = urllib.request.Request(url, headers=headers)
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data = json.loads(r.read().decode('utf-8'))
+            ids = data.get('ids', data) if isinstance(data, dict) else data
+            ids = set(str(i) for i in ids if i)
+            print('Channel list: %d ids from %s' % (len(ids), url))
+            return ids
+        except Exception as e:  # noqa: BLE001 — report and retry
+            last = e
+            print('Could not get the channel list from the site (try %d): %s' % (attempt + 1, e))
+            time.sleep(10 * (attempt + 1))
+    raise SystemExit('No channel list: ids.json is missing from the repository and the site refused the request (%s). '
+                     'Open the Teleora admin > TV guide and press "Start a new build" — the site uploads ids.json first.' % last)
 
 
 def rank(entry):
@@ -44,12 +75,13 @@ def write_channels(path, entries):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('--epg', required=True)
+    ap.add_argument('--ids-file', default='ids.json')
     ap.add_argument('--ids-url', default='')
     ap.add_argument('--buckets', type=int, default=20)
     ap.add_argument('--out', required=True)
     a = ap.parse_args()
 
-    wanted = load_ids(a.ids_url)
+    wanted = load_ids(a.ids_file, a.ids_url)
     by_channel = collections.defaultdict(list)
     for path in glob.glob(os.path.join(a.epg, 'sites', '*', '*.channels.xml')):
         try:
