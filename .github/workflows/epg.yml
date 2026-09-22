@@ -20,7 +20,8 @@ permissions:
   contents: write
 
 env:
-  # The list of channel ids to build a guide for
+  # The list of channel ids to build a guide for. The site uploads it to this
+  # repository as ids.json before each build; the address below is only a backup.
   IDS_URL: https://teleora.cc/api/epg-ids.php
   # Parallel grab jobs (public repositories get 20 at once for free)
   BUCKETS: 20
@@ -40,7 +41,7 @@ jobs:
 
       - name: Plan which site grabs which channel
         id: plan
-        run: python3 scripts/plan.py --epg epg --ids-url "$IDS_URL" --buckets "$BUCKETS" --out plan
+        run: python3 scripts/plan.py --epg epg --ids-file ids.json --ids-url "$IDS_URL" --buckets "$BUCKETS" --out plan
 
       - uses: actions/upload-artifact@v4
         with:
